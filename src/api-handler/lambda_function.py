@@ -3,27 +3,36 @@ import boto3
 import logging
 from decimal import Decimal
 from boto3.dynamodb.conditions import Key
+import uuid
+from datetime import datetime, timedelta
 
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# Initialize DynamoDB
+# Initialize AWS clients
 dynamodb = boto3.resource('dynamodb')
+s3_client = boto3.client('s3')
 table = dynamodb.Table('receipt-parser-receipts')
 
+# Configuration
+UPLOAD_BUCKET = 'receipt-parser-receipts-y5e1exjh'
+
 def lambda_handler(event, context):
-    """API Gateway handler for receipt queries"""
+    """API Gateway handler for receipt queries and uploads"""
     try:
         # Parse request
         http_method = event.get('httpMethod', '')
         path = event.get('path', '')
         path_parameters = event.get('pathParameters') or {}
+        body = event.get('body', '{}')
         
         logger.info(f"API Request: {http_method} {path}")
         
         # Route requests
-        if http_method == 'GET' and path == '/receipts':
+        if http_method == 'POST' and path == '/upload':
+            return generate_upload_url(body)
+        elif http_method == 'GET' and path == '/receipts':
             return get_all_receipts()
         elif http_method == 'GET' and path.startswith('/receipts/category/'):
             category = path_parameters.get('category')
@@ -39,6 +48,43 @@ def lambda_handler(event, context):
     except Exception as e:
         logger.error(f"API Error: {str(e)}")
         return error_response(500, str(e))
+
+def generate_upload_url(body):
+    """Generate pre-signed URL for direct S3 upload"""
+    try:
+        # Parse request body
+        data = json.loads(body) if body else {}
+        filename = data.get('filename', f'receipt-{int(datetime.now().timestamp())}.jpg')
+        content_type = data.get('contentType', 'image/jpeg')
+        
+        # Generate unique key to avoid conflicts
+        timestamp = int(datetime.now().timestamp())
+        unique_filename = f"{timestamp}-{filename}"
+        key = f"receipts/{unique_filename}"
+        
+        logger.info(f"Generating upload URL for: {key}")
+        
+        # Generate pre-signed URL for PUT operation
+        upload_url = s3_client.generate_presigned_url(
+            'put_object',
+            Params={
+                'Bucket': UPLOAD_BUCKET,
+                'Key': key,
+                'ContentType': content_type
+            },
+            ExpiresIn=3600  # URL expires in 1 hour
+        )
+        
+        return success_response({
+            'uploadUrl': upload_url,
+            'key': key,
+            'filename': unique_filename,
+            'message': 'Upload URL generated successfully'
+        })
+        
+    except Exception as e:
+        logger.error(f"Error generating upload URL: {str(e)}")
+        return error_response(500, f"Error generating upload URL: {str(e)}")
 
 def get_all_receipts():
     """Get all receipts"""
